@@ -16,6 +16,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
 import java.text.SimpleDateFormat;
+import java.util.ArrayList;
 import java.util.Date;
 import java.util.Locale;
 
@@ -29,6 +30,7 @@ public class MainActivity extends AppCompatActivity {
 
     private DatabaseHelper dbHelper;
     private SQLiteDatabase database;
+    private ArrayList<Object[]> satelliteDataBuffer = new ArrayList<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -69,20 +71,17 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onSatelliteStatusChanged(GnssStatus status) {
                 super.onSatelliteStatusChanged(status);
-                int satelliteCount = status.getSatelliteCount();
 
-                // 获取当前时间戳
-                String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-
-                for (int i = 0; i < satelliteCount; i++) {
+                // 清空缓冲区并填充卫星状态数据
+                satelliteDataBuffer.clear();
+                for (int i = 0; i < status.getSatelliteCount(); i++) {
                     int svid = status.getSvid(i);
                     float azimuth = status.getAzimuthDegrees(i);
                     float elevation = status.getElevationDegrees(i);
                     float snr = status.getCn0DbHz(i); // 信噪比
                     String type = getSatelliteType(status.getConstellationType(i));
 
-                    // 插入卫星记录
-                    insertSatelliteRecord(timestamp, svid, type, azimuth, elevation, snr);
+                    satelliteDataBuffer.add(new Object[]{svid, type, azimuth, elevation, snr});
                 }
             }
         };
@@ -91,15 +90,15 @@ public class MainActivity extends AppCompatActivity {
 
         // 启动位置更新
         locationListener = location -> {
-            double latitude = location.getLatitude();
-            double longitude = location.getLongitude();
-            float accuracy = location.getAccuracy();
+            double latitude = location != null ? location.getLatitude() : 0.0;
+            double longitude = location != null ? location.getLongitude() : 0.0;
+            double accuracy = location != null ? location.getAccuracy() : 0.0;
 
             // 获取当前时间戳
             String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
 
-            // 插入定位记录
-            insertLocationRecord(timestamp, latitude, longitude, accuracy);
+            // 插入一次定位记录和对应的卫星状态
+            insertDataAsTransaction(timestamp, latitude, longitude, accuracy);
         };
 
         locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, samplingInterval, 0, locationListener);
@@ -119,18 +118,39 @@ public class MainActivity extends AppCompatActivity {
         if (locationListener != null) {
             locationManager.removeUpdates(locationListener);
         }
+
+        // 关闭数据库
+        if (database != null) {
+            database.close();
+            Log.d("DBClose", "数据库已关闭");
+        }
     }
 
-    private void insertLocationRecord(String timestamp, double latitude, double longitude, float accuracy) {
-        String sql = "INSERT INTO location_record (timestamp, latitude, longitude, accuracy) VALUES (?, ?, ?, ?)";
-        database.execSQL(sql, new Object[]{timestamp, latitude, longitude, accuracy});
-        Log.d("DBWrite", "定位记录已插入: " + timestamp);
-    }
+    private void insertDataAsTransaction(String timestamp, double latitude, double longitude, double accuracy) {
+        database.beginTransaction();
+        try {
+            // 插入定位记录
+            String locationInsertSQL = "INSERT INTO location_record (timestamp, latitude, longitude, accuracy) VALUES (?, ?, ?, ?)";
+            database.execSQL(locationInsertSQL, new Object[]{timestamp, latitude, longitude, accuracy});
 
-    private void insertSatelliteRecord(String timestamp, int svid, String type, float azimuth, float elevation, float snr) {
-        String sql = "INSERT INTO satellite_info (timestamp, satellite_id, type, azimuth, elevation, snr) VALUES (?, ?, ?, ?, ?, ?)";
-        database.execSQL(sql, new Object[]{timestamp, svid, type, azimuth, elevation, snr});
-        Log.d("DBWrite", "卫星记录已插入: " + svid + " - " + timestamp);
+            // 获取插入的定位记录的 ID
+            String lastInsertIdSQL = "SELECT last_insert_rowid()";
+            int locationId = (int) database.compileStatement(lastInsertIdSQL).simpleQueryForLong();
+
+            // 插入对应的卫星记录
+            for (Object[] satellite : satelliteDataBuffer) {
+                String satelliteInsertSQL = "INSERT INTO satellite_info (satellite_id, type, azimuth, elevation, snr, location_id) VALUES (?, ?, ?, ?, ?, ?)";
+                database.execSQL(satelliteInsertSQL, new Object[]{satellite[0], satellite[1], satellite[2], satellite[3], satellite[4], locationId});
+            }
+
+            database.setTransactionSuccessful();
+            Log.d("DBWrite", "事务插入成功 - 定位时间: " + timestamp);
+        } catch (Exception e) {
+            Log.e("DBWrite", "事务插入失败", e);
+        } finally {
+            database.endTransaction();
+            satelliteDataBuffer.clear();
+        }
     }
 
     private String getSatelliteType(int constellationType) {
@@ -154,12 +174,6 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    @Override
-    protected void onDestroy() {
-        super.onDestroy();
-        if (database != null) database.close();
-    }
-
     static class DatabaseHelper extends SQLiteOpenHelper {
         private static final String DB_NAME = "gnss_data.db";
         private static final int DB_VERSION = 1;
@@ -170,23 +184,9 @@ public class MainActivity extends AppCompatActivity {
 
         @Override
         public void onCreate(SQLiteDatabase db) {
-            // 创建定位记录表
-            db.execSQL("CREATE TABLE location_record (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "timestamp TEXT," +
-                    "latitude REAL," +
-                    "longitude REAL," +
-                    "accuracy REAL)");
+            db.execSQL("CREATE TABLE location_record (" + "id INTEGER PRIMARY KEY AUTOINCREMENT," + "timestamp TEXT," + "latitude REAL," + "longitude REAL," + "accuracy REAL)");
 
-            // 创建卫星记录表
-            db.execSQL("CREATE TABLE satellite_info (" +
-                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
-                    "timestamp TEXT," +
-                    "satellite_id INTEGER," +
-                    "type TEXT," +
-                    "azimuth REAL," +
-                    "elevation REAL," +
-                    "snr REAL)");
+            db.execSQL("CREATE TABLE satellite_info (" + "id INTEGER PRIMARY KEY AUTOINCREMENT," + "satellite_id INTEGER," + "type TEXT," + "azimuth REAL," + "elevation REAL," + "snr REAL," + "location_id INTEGER," + "FOREIGN KEY(location_id) REFERENCES location_record(id))");
         }
 
         @Override
