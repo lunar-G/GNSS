@@ -57,6 +57,61 @@ public class MainActivity extends AppCompatActivity {
         stopButton.setOnClickListener(v -> stopCollecting());
     }
 
+    private void startCollecting() {
+        if (isCollecting) return;
+
+        // 检查权限
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 1);
+            return;
+        }
+
+        isCollecting = true;
+
+        // 启动 GNSS 状态回调
+        gnssCallback = new GnssStatus.Callback() {
+            @Override
+            public void onSatelliteStatusChanged(GnssStatus status) {
+                super.onSatelliteStatusChanged(status);
+
+                synchronized (satelliteDataBuffer) {
+                    satelliteDataBuffer.clear();
+                    for (int i = 0; i < status.getSatelliteCount(); i++) {
+                        int svid = status.getSvid(i);
+                        float azimuth = status.getAzimuthDegrees(i);
+                        float elevation = status.getElevationDegrees(i);
+                        float snr = status.getCn0DbHz(i); // 信噪比
+                        String type = getSatelliteType(status.getConstellationType(i));
+
+                        satelliteDataBuffer.add(new Object[]{svid, type, azimuth, elevation, snr});
+                    }
+                }
+            }
+        };
+
+        locationManager.registerGnssStatusCallback(gnssCallback);
+
+        // 启动位置更新
+        locationListener = location -> {
+            double latitude = location != null ? location.getLatitude() : 0.0;
+            double longitude = location != null ? location.getLongitude() : 0.0;
+            double accuracy = location != null ? location.getAccuracy() : 0.0;
+
+            // 获取当前时间戳
+            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
+
+            // 获取卫星数据的快照
+            ArrayList<Object[]> satelliteSnapshot;
+            synchronized (satelliteDataBuffer) {
+                satelliteSnapshot = new ArrayList<>(satelliteDataBuffer);
+            }
+
+            // 插入一次定位记录和对应的卫星状态
+            insertDataAsTransaction(timestamp, latitude, longitude, accuracy, satelliteSnapshot);
+        };
+
+        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, samplingInterval, 0, locationListener);
+    }
 
     private void stopCollecting() {
         if (!isCollecting) return;
@@ -80,7 +135,7 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
-    private void insertDataAsTransaction(String timestamp, double latitude, double longitude, double accuracy) {
+    private void insertDataAsTransaction(String timestamp, double latitude, double longitude, double accuracy, ArrayList<Object[]> satelliteSnapshot) {
         database.beginTransaction();
         try {
             // 插入定位记录
@@ -96,7 +151,7 @@ public class MainActivity extends AppCompatActivity {
             SQLiteStatement statement = database.compileStatement(satelliteInsertSQL);
 
             // 批量插入卫星记录
-            for (Object[] satellite : satelliteDataBuffer) {
+            for (Object[] satellite : satelliteSnapshot) {
                 statement.clearBindings();
                 statement.bindLong(1, (int) satellite[0]); // satellite_id
                 statement.bindString(2, (String) satellite[1]); // type
@@ -113,10 +168,9 @@ public class MainActivity extends AppCompatActivity {
             Log.e("DBWrite", "事务插入失败", e);
         } finally {
             database.endTransaction();
-            satelliteDataBuffer.clear();
+            satelliteSnapshot.clear();
         }
     }
-
 
     private String getSatelliteType(int constellationType) {
         switch (constellationType) {
@@ -147,12 +201,24 @@ public class MainActivity extends AppCompatActivity {
             super(context, new File(context.getExternalFilesDir(null), DB_NAME).getAbsolutePath(), null, DB_VERSION);
         }
 
-
         @Override
         public void onCreate(SQLiteDatabase db) {
-            db.execSQL("CREATE TABLE location_record (" + "id INTEGER PRIMARY KEY AUTOINCREMENT," + "timestamp TEXT," + "latitude REAL," + "longitude REAL," + "accuracy REAL)");
+            db.execSQL("CREATE TABLE location_record (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    "timestamp TEXT," +
+                    "latitude REAL," +
+                    "longitude REAL," +
+                    "accuracy REAL)");
 
-            db.execSQL("CREATE TABLE satellite_info (" + "id INTEGER PRIMARY KEY AUTOINCREMENT," + "satellite_id INTEGER," + "type TEXT," + "azimuth REAL," + "elevation REAL," + "snr REAL," + "location_id INTEGER," + "FOREIGN KEY(location_id) REFERENCES location_record(id))");
+            db.execSQL("CREATE TABLE satellite_info (" +
+                    "id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    "satellite_id INTEGER," +
+                    "type TEXT," +
+                    "azimuth REAL," +
+                    "elevation REAL," +
+                    "snr REAL," +
+                    "location_id INTEGER," +
+                    "FOREIGN KEY(location_id) REFERENCES location_record(id))");
         }
 
         @Override
