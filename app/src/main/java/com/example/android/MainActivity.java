@@ -5,16 +5,17 @@ import android.content.pm.PackageManager;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
 import android.location.GnssStatus;
-import android.location.Location;
 import android.location.LocationListener;
 import android.location.LocationManager;
 import android.os.Bundle;
+import android.os.Environment;
 import android.util.Log;
 import android.widget.Button;
 
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 
+import java.io.File;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -179,8 +180,9 @@ public class MainActivity extends AppCompatActivity {
         private static final int DB_VERSION = 1;
 
         public DatabaseHelper(MainActivity context) {
-            super(context, context.getExternalFilesDir(null).getAbsolutePath() + "/" + DB_NAME, null, DB_VERSION);
+            super(context, new File(context.getExternalFilesDir(null), DB_NAME).getAbsolutePath(), null, DB_VERSION);
         }
+
 
         @Override
         public void onCreate(SQLiteDatabase db) {
