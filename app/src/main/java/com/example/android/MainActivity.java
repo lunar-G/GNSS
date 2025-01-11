@@ -4,6 +4,7 @@ import android.Manifest;
 import android.content.pm.PackageManager;
 import android.database.sqlite.SQLiteDatabase;
 import android.database.sqlite.SQLiteOpenHelper;
+import android.database.sqlite.SQLiteStatement;
 import android.location.GnssStatus;
 import android.location.LocationListener;
 import android.location.LocationManager;
@@ -56,54 +57,6 @@ public class MainActivity extends AppCompatActivity {
         stopButton.setOnClickListener(v -> stopCollecting());
     }
 
-    private void startCollecting() {
-        if (isCollecting) return;
-
-        // 检查权限
-        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(this, new String[]{Manifest.permission.ACCESS_FINE_LOCATION}, 1);
-            return;
-        }
-
-        isCollecting = true;
-
-        // 启动 GNSS 状态回调
-        gnssCallback = new GnssStatus.Callback() {
-            @Override
-            public void onSatelliteStatusChanged(GnssStatus status) {
-                super.onSatelliteStatusChanged(status);
-
-                // 清空缓冲区并填充卫星状态数据
-                satelliteDataBuffer.clear();
-                for (int i = 0; i < status.getSatelliteCount(); i++) {
-                    int svid = status.getSvid(i);
-                    float azimuth = status.getAzimuthDegrees(i);
-                    float elevation = status.getElevationDegrees(i);
-                    float snr = status.getCn0DbHz(i); // 信噪比
-                    String type = getSatelliteType(status.getConstellationType(i));
-
-                    satelliteDataBuffer.add(new Object[]{svid, type, azimuth, elevation, snr});
-                }
-            }
-        };
-
-        locationManager.registerGnssStatusCallback(gnssCallback);
-
-        // 启动位置更新
-        locationListener = location -> {
-            double latitude = location != null ? location.getLatitude() : 0.0;
-            double longitude = location != null ? location.getLongitude() : 0.0;
-            double accuracy = location != null ? location.getAccuracy() : 0.0;
-
-            // 获取当前时间戳
-            String timestamp = new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.getDefault()).format(new Date());
-
-            // 插入一次定位记录和对应的卫星状态
-            insertDataAsTransaction(timestamp, latitude, longitude, accuracy);
-        };
-
-        locationManager.requestLocationUpdates(LocationManager.GPS_PROVIDER, samplingInterval, 0, locationListener);
-    }
 
     private void stopCollecting() {
         if (!isCollecting) return;
@@ -138,10 +91,20 @@ public class MainActivity extends AppCompatActivity {
             String lastInsertIdSQL = "SELECT last_insert_rowid()";
             int locationId = (int) database.compileStatement(lastInsertIdSQL).simpleQueryForLong();
 
-            // 插入对应的卫星记录
+            // 构建卫星记录的批量插入语句
+            String satelliteInsertSQL = "INSERT INTO satellite_info (satellite_id, type, azimuth, elevation, snr, location_id) VALUES (?, ?, ?, ?, ?, ?)";
+            SQLiteStatement statement = database.compileStatement(satelliteInsertSQL);
+
+            // 批量插入卫星记录
             for (Object[] satellite : satelliteDataBuffer) {
-                String satelliteInsertSQL = "INSERT INTO satellite_info (satellite_id, type, azimuth, elevation, snr, location_id) VALUES (?, ?, ?, ?, ?, ?)";
-                database.execSQL(satelliteInsertSQL, new Object[]{satellite[0], satellite[1], satellite[2], satellite[3], satellite[4], locationId});
+                statement.clearBindings();
+                statement.bindLong(1, (int) satellite[0]); // satellite_id
+                statement.bindString(2, (String) satellite[1]); // type
+                statement.bindDouble(3, (float) satellite[2]); // azimuth
+                statement.bindDouble(4, (float) satellite[3]); // elevation
+                statement.bindDouble(5, (float) satellite[4]); // snr
+                statement.bindLong(6, locationId); // location_id
+                statement.execute();
             }
 
             database.setTransactionSuccessful();
@@ -153,6 +116,7 @@ public class MainActivity extends AppCompatActivity {
             satelliteDataBuffer.clear();
         }
     }
+
 
     private String getSatelliteType(int constellationType) {
         switch (constellationType) {
